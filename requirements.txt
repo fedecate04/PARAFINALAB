@@ -1,9 +1,10 @@
-python-3.12.4
+
 streamlit>=1.33
 numpy>=1.26
 pandas>=2.2
 matplotlib>=3.8
 reportlab>=4.0
+
 
 
 
