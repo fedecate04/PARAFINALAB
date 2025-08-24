@@ -131,63 +131,85 @@ def prepare_xy(df: pd.DataFrame):
     y = np.log10(df["mu_Pa_s"].values)
     return x, y
 
-def make_figure(df: pd.DataFrame, fit):
+def make_figure(df: pd.DataFrame, fit, estilo="apunte"):
     """
-    Genera figura log10(mu) vs 1/T con rectas y punto crítico.
-    También añade un segundo eje arriba con T[°C] para lectura visual.
+    Figura estilo 'apunte':
+      - y: μ [Pa·s] en escala log (no log10(μ))
+      - x: T [°C] (no 1/T)
+    El ajuste sigue hecho en el espacio log10(μ) vs 1/T, pero se transforma a μ vs T para visualizar.
     """
-    x, y = prepare_xy(df)
+    # Datos
+    T_C = df["T_C"].values
+    mu   = df["mu_Pa_s"].values
+
+    # Coeficientes del ajuste en espacio (x=1/T[K], y=log10(mu))
     m1, b1 = fit["coefs1"]
     m2, b2 = fit["coefs2"]
+    k      = fit["k_opt"]
+    xb, yb = fit["x_break"], fit["y_break"]   # xb = (1/T[K])*, yb = log10(mu)*
 
+    # Ejes: T [°C] como x principal
     fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
-    ax.scatter(x, y, color=PRIMARY, label="Datos", zorder=3)
 
-    # rangos por tramo
-    k = fit["k_opt"]
-    x1, y1 = x[:k+1], y[:k+1]
-    x2, y2 = x[k+1:], y[k+1:]
+    # Dispersión de datos en μ vs T
+    ax.scatter(T_C, mu, color=PRIMARY, label="Datos", zorder=3)
 
-    xx1 = np.linspace(x1.min(), x1.max(), 50)
-    yy1 = m1*xx1 + b1
-    xx2 = np.linspace(x2.min(), x2.max(), 50)
-    yy2 = m2*xx2 + b2
+    # Construir curvas de ajuste EN μ vs T:
+    # tramo 1 = puntos 0..k ; tramo 2 = puntos k+1..end
+    T1 = T_C[:k+1]
+    T2 = T_C[k+1:]
 
-    ax.plot(xx1, yy1, color=ACCENT, lw=2, label="Ajuste tramo 1")
-    ax.plot(xx2, yy2, color=MUTED, lw=2, label="Ajuste tramo 2")
+    def mu_fit_from_line(Tc_array, m, b):
+        Tk = Tc_array + 273.15
+        x_invK = 1.0 / Tk
+        y_log10 = m * x_invK + b
+        return np.power(10.0, y_log10)
 
-    # punto crítico
-    xb, yb = fit["x_break"], fit["y_break"]
-    ax.scatter([xb], [yb], color="red", s=60, zorder=4, label="Punto crítico (WAT)")
-    T_wat = x_to_TC(xb)
+    # Curvas suaves por tramo
+    T1_line = np.linspace(T1.min(), T1.max(), 80) if len(T1) >= 2 else T1
+    T2_line = np.linspace(T2.min(), T2.max(), 80) if len(T2) >= 2 else T2
 
-    ax.set_xlabel(r"$1/T$  [K$^{-1}$]")
-    ax.set_ylabel(r"$\log_{10}(\mu)$  [Pa·s]")
+    mu1_line = mu_fit_from_line(T1_line, m1, b1)
+    mu2_line = mu_fit_from_line(T2_line, m2, b2)
 
-    ax.grid(alpha=0.25)
+    ax.plot(T1_line, mu1_line, color=ACCENT, lw=2, label="Ajuste tramo 1")
+    ax.plot(T2_line, mu2_line, color=MUTED,  lw=2, label="Ajuste tramo 2")
+
+    # Punto crítico (WAT) en coordenadas T[°C]–μ
+    T_wat = x_to_TC(xb)             # xb = 1/T[K]
+    mu_wat = np.power(10.0, yb)     # yb = log10(mu*)
+    ax.scatter([T_wat], [mu_wat], color="red", s=70, zorder=4, label="Punto crítico (WAT)")
+
+    # Estilo de ejes
+    ax.set_yscale("log", base=10)
+    ax.set_xlabel("Temperatura, T [°C]")
+    ax.set_ylabel("Viscosidad, μ [Pa·s]")
+    ax.grid(alpha=0.25, which="both", axis="both")
     ax.legend(frameon=False, loc="best")
-    ax.set_title("Detección de WAT por pendiente quebrada")
+    ax.set_title(f"Determinación de WAT   {T_wat:.1f} °C")
 
-    # eje superior con T[°C]
-    def invT_to_Tc_ticks(xvals):
-        return [f"{x_to_TC(val):.1f}" for val in xvals]
+    # Eje superior opcional con 1/T [K^-1] (ayuda a la lectura “técnica”)
+    def Tc_to_invT_ticks(tvals):
+        Tk = tvals + 273.15
+        return 1.0 / Tk
 
-    ax_top = ax.secondary_xaxis('top')
-    xticks = np.linspace(x.min(), x.max(), 6)
+    ax_top = ax.secondary_xaxis('top', functions=(lambda Tc: 1.0/(Tc+273.15), lambda invT: (1.0/invT)-273.15))
+    xticks = np.linspace(T_C.min(), T_C.max(), 6)
     ax.set_xticks(xticks)
     ax_top.set_xticks(xticks)
-    ax_top.set_xticklabels(invT_to_Tc_ticks(xticks))
-    ax_top.set_xlabel("Temperatura [°C]")
+    ax_top.set_xlabel(r"$1/T$  [K$^{-1}$]")
 
-    # anotación
+    # Anotación WAT
+    # Colocamos el texto un poco arriba (en escala log la separación visual es multiplicativa)
     ax.annotate(f"WAT ≈ {T_wat:.2f} °C",
-                xy=(xb, yb),
-                xytext=(xb, yb + 0.15),
+                xy=(T_wat, mu_wat),
+                xytext=(T_wat + 0.03*(T_C.max()-T_C.min()), mu_wat*1.3),
                 arrowprops=dict(arrowstyle="->", color="red"),
                 color="red")
 
     plt.tight_layout()
     return fig
+
 
 def fig_to_png_bytes(fig):
     buf = io.BytesIO()
