@@ -182,6 +182,16 @@ def make_figure(df: pd.DataFrame, fit, estilo="apunte"):
 
     # Estilo de ejes
     ax.set_yscale("log", base=10)
+    from matplotlib.ticker import LogLocator, LogFormatterMathtext, NullFormatter
+
+ax.set_yscale("log", base=10)
+# ticks mayores: 10^-2, 10^-1, 10^0, 10^1, 10^2 (ajusta límites si querés)
+ax.set_ylim(1e0, 1e2)  # opcional, para que se lea como el apunte (1 a 100 Pa·s)
+ax.yaxis.set_major_locator(LogLocator(base=10.0, numticks=5))
+ax.yaxis.set_major_formatter(LogFormatterMathtext(base=10.0))
+ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(2, 10)*0.1))
+ax.yaxis.set_minor_formatter(NullFormatter())
+
     ax.set_xlabel("Temperatura, T [°C]")
     ax.set_ylabel("Viscosidad, μ [Pa·s]")
     ax.grid(alpha=0.25, which="both", axis="both")
