@@ -8,19 +8,11 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-# --- Corrección mínima y robusta del import de matplotlib ---
-# Intenta importar; si no está, instala y usa backend 'Agg' (headless/servidor).
-try:
-    import matplotlib
-    matplotlib.use("Agg")  # asegura backend no interactivo antes de importar pyplot
-    import matplotlib.pyplot as plt
-except ModuleNotFoundError:
-    import sys, subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "matplotlib==3.8.4"])
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-# ------------------------------------------------------------
+# --- Corrección: fijar backend y evitar instalación en caliente ---
+import matplotlib
+matplotlib.use("Agg")  # backend headless para servidores/Streamlit
+import matplotlib.pyplot as plt
+# -----------------------------------------------------------------
 
 import streamlit as st
 from reportlab.lib.pagesizes import A4
