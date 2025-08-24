@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 import io
 import os
-import base64
 from datetime import datetime
 
 import numpy as np
@@ -56,9 +55,7 @@ def read_csv_no_header(file) -> pd.DataFrame:
 
 def clean_manual_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # Normalizar nombres por si vuelven distintos
     df.columns = ["T_C", "mu_Pa_s"]
-    # coerce
     df["T_C"] = pd.to_numeric(df["T_C"], errors="coerce")
     df["mu_Pa_s"] = pd.to_numeric(df["mu_Pa_s"], errors="coerce")
     df = df.replace([np.inf, -np.inf], np.nan).dropna()
@@ -85,24 +82,19 @@ def segmented_two_lines(x, y, min_pts=3):
         "y_break": None
     }
 
-    # candidatos: k separa [0..k] y [k+1..n-1]
     for k in range(min_pts-1, n - min_pts):
         x1, y1 = x[:k+1], y[:k+1]
         x2, y2 = x[k+1:], y[k+1:]
-        # Ajustes lineales
         m1, b1 = np.polyfit(x1, y1, 1)
         m2, b2 = np.polyfit(x2, y2, 1)
-        # SSE
         sse1 = np.sum((y1 - (m1*x1 + b1))**2)
         sse2 = np.sum((y2 - (m2*x2 + b2))**2)
         sse = sse1 + sse2
         if sse < best["sse_min"]:
-            # Intersección de las rectas: m1*x + b1 = m2*x + b2
             if abs(m1 - m2) > 1e-12:
                 x_int = (b2 - b1) / (m1 - m2)
                 y_int = m1*x_int + b1
             else:
-                # casi paralelas: tomamos el punto medio entre segmentos
                 x_int = (x[k] + x[k+1]) / 2.0
                 y_int = (y[k] + y[k+1]) / 2.0
 
@@ -134,9 +126,9 @@ def prepare_xy(df: pd.DataFrame):
 def make_figure(df: pd.DataFrame, fit, estilo="apunte"):
     """
     Figura estilo 'apunte':
-      - y: μ [Pa·s] en escala log (no log10(μ))
-      - x: T [°C] (no 1/T)
-    El ajuste sigue hecho en el espacio log10(μ) vs 1/T, pero se transforma a μ vs T para visualizar.
+      - y: μ [Pa·s] en escala log
+      - x: T [°C]
+    El ajuste se hace en (log10 μ) vs (1/T) y se transforma a μ vs T para visualizar.
     """
     # Datos
     T_C = df["T_C"].values
@@ -155,7 +147,6 @@ def make_figure(df: pd.DataFrame, fit, estilo="apunte"):
     ax.scatter(T_C, mu, color=PRIMARY, label="Datos", zorder=3)
 
     # Construir curvas de ajuste EN μ vs T:
-    # tramo 1 = puntos 0..k ; tramo 2 = puntos k+1..end
     T1 = T_C[:k+1]
     T2 = T_C[k+1:]
 
@@ -176,21 +167,21 @@ def make_figure(df: pd.DataFrame, fit, estilo="apunte"):
     ax.plot(T2_line, mu2_line, color=MUTED,  lw=2, label="Ajuste tramo 2")
 
     # Punto crítico (WAT) en coordenadas T[°C]–μ
-    T_wat = x_to_TC(xb)             # xb = 1/T[K]
-    mu_wat = np.power(10.0, yb)     # yb = log10(mu*)
+    T_wat = x_to_TC(xb)
+    mu_wat = np.power(10.0, yb)
     ax.scatter([T_wat], [mu_wat], color="red", s=70, zorder=4, label="Punto crítico (WAT)")
 
-    # Estilo de ejes
-    ax.set_yscale("log", base=10)
+    # Estilo de ejes (log en Y)
     from matplotlib.ticker import LogLocator, LogFormatterMathtext, NullFormatter
-
-ax.set_yscale("log", base=10)
-# ticks mayores: 10^-2, 10^-1, 10^0, 10^1, 10^2 (ajusta límites si querés)
-ax.set_ylim(1e0, 1e2)  # opcional, para que se lea como el apunte (1 a 100 Pa·s)
-ax.yaxis.set_major_locator(LogLocator(base=10.0, numticks=5))
-ax.yaxis.set_major_formatter(LogFormatterMathtext(base=10.0))
-ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(2, 10)*0.1))
-ax.yaxis.set_minor_formatter(NullFormatter())
+    ax.set_yscale("log", base=10)
+    # rango sugerido; podés comentar si querés autoscale
+    ymin = min(1e-3, np.nanmin(mu)*0.8) if np.all(np.isfinite(mu)) else 1e-3
+    ymax = max(1e2,  np.nanmax(mu)*1.2) if np.all(np.isfinite(mu)) else 1e2
+    ax.set_ylim(ymin, ymax)
+    ax.yaxis.set_major_locator(LogLocator(base=10.0, numticks=6))
+    ax.yaxis.set_major_formatter(LogFormatterMathtext(base=10.0))
+    ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(2, 10)*0.1))
+    ax.yaxis.set_minor_formatter(NullFormatter())
 
     ax.set_xlabel("Temperatura, T [°C]")
     ax.set_ylabel("Viscosidad, μ [Pa·s]")
@@ -198,19 +189,17 @@ ax.yaxis.set_minor_formatter(NullFormatter())
     ax.legend(frameon=False, loc="best")
     ax.set_title(f"Determinación de WAT   {T_wat:.1f} °C")
 
-    # Eje superior opcional con 1/T [K^-1] (ayuda a la lectura “técnica”)
-    def Tc_to_invT_ticks(tvals):
-        Tk = tvals + 273.15
-        return 1.0 / Tk
-
-    ax_top = ax.secondary_xaxis('top', functions=(lambda Tc: 1.0/(Tc+273.15), lambda invT: (1.0/invT)-273.15))
-    xticks = np.linspace(T_C.min(), T_C.max(), 6)
+    # Eje superior opcional con 1/T [K^-1]
+    ax_top = ax.secondary_xaxis(
+        'top',
+        functions=(lambda Tc: 1.0/(Tc+273.15), lambda invT: (1.0/invT)-273.15)
+    )
+    xticks = np.linspace(T_C.min(), T_C.max(), 6) if len(T_C) >= 2 else T_C
     ax.set_xticks(xticks)
     ax_top.set_xticks(xticks)
     ax_top.set_xlabel(r"$1/T$  [K$^{-1}$]")
 
     # Anotación WAT
-    # Colocamos el texto un poco arriba (en escala log la separación visual es multiplicativa)
     ax.annotate(f"WAT ≈ {T_wat:.2f} °C",
                 xy=(T_wat, mu_wat),
                 xytext=(T_wat + 0.03*(T_C.max()-T_C.min()), mu_wat*1.3),
@@ -235,11 +224,12 @@ def fig_to_pdf_bytes(fig):
 
 def maybe_load_logo():
     """
-    Intenta cargar logoutn.png del directorio. Si no existe, devuelve None.
+    Carga logoutn.png desde el directorio del app (repo local). Si no existe, devuelve None.
     """
-    if os.path.exists("logoutn.png"):
+    path = "logoutn.png"
+    if os.path.exists(path):
         try:
-            with open("logoutn.png", "rb") as f:
+            with open(path, "rb") as f:
                 return f.read()
         except Exception:
             return None
@@ -247,63 +237,89 @@ def maybe_load_logo():
 
 def export_pedagogical_pdf(df, fit, fig_png_bytes, meta, custom_logo_bytes=None):
     """
-    Genera PDF pedagógico (A4) con portada, datos, figura y explicación.
-    df: DataFrame limpio
-    fit: resultado de segmented_two_lines
-    fig_png_bytes: imagen de la figura (PNG)
-    meta: dict con claves: page_title, page_subtitle, profesor, alumno
-    custom_logo_bytes: bytes del logo si está disponible
+    PDF pedagógico (A4) con portada, datos, figura y explicación.
+    Maquetación corregida para evitar superposición de logo y títulos.
     """
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     W, H = A4
 
-    # Portada
-    y = H - 2*cm
+    # ===== Portada / Encabezado =====
+    margin_x = 1.5*cm
+    margin_y = 1.5*cm
+    header_height = 3.0*cm  # banda de encabezado
+
+    # Banda superior
+    c.setFillColorRGB(0.93, 0.99, 1.00)  # celeste muy claro
+    c.rect(0, H - header_height, W, header_height, stroke=0, fill=1)
+
+    # Logo a la derecha
     if custom_logo_bytes:
         try:
             logo = ImageReader(io.BytesIO(custom_logo_bytes))
-            c.drawImage(logo, x=1.5*cm, y=H-3.5*cm, width=3.5*cm, height=2.2*cm, mask='auto')
+            logo_w = 3.8*cm
+            logo_h = 2.2*cm
+            c.drawImage(
+                logo,
+                x=W - margin_x - logo_w,
+                y=H - margin_y - logo_h,
+                width=logo_w,
+                height=logo_h,
+                mask='auto',
+                preserveAspectRatio=True,
+                anchor='sw'
+            )
         except Exception:
             pass
 
+    # Título a la izquierda
     c.setFillColorRGB(0.06, 0.46, 0.43)  # PRIMARY
-    c.setFont("Helvetica-Bold", 18)
-    c.drawString(1.5*cm, y, meta["page_title"])
-    y -= 0.9*cm
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(margin_x, H - margin_y - 0.8*cm, meta["page_title"])
     c.setFillColorRGB(0.03, 0.57, 0.70)  # ACCENT
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(1.5*cm, y, meta["page_subtitle"])
+    c.setFont("Helvetica-Bold", 13)
+    c.drawString(margin_x, H - margin_y - 1.5*cm, meta["page_subtitle"])
 
-    y -= 1.2*cm
-    c.setFillColorRGB(0,0,0)
+    # Línea divisoria
+    c.setStrokeColorRGB(0.75, 0.90, 0.95)
+    c.setLineWidth(1.2)
+    c.line(margin_x, H - header_height - 0.2*cm, W - margin_x, H - header_height - 0.2*cm)
+
+    # Metadatos (debajo del encabezado)
+    y = H - header_height - 0.8*cm
+    c.setFillColorRGB(0, 0, 0)
     c.setFont("Helvetica", 11)
-    c.drawString(1.5*cm, y, f"Profesor: {meta['profesor']}")
+    c.drawString(margin_x, y, f"Profesor: {meta['profesor']}")
     y -= 0.6*cm
-    c.drawString(1.5*cm, y, f"Alumno: {meta['alumno']}")
+    c.drawString(margin_x, y, f"Alumno: {meta['alumno']}")
     y -= 0.6*cm
-    c.drawString(1.5*cm, y, f"Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    c.drawString(margin_x, y, f"Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
     # Resultado WAT
     xb = fit["x_break"]
     T_wat = x_to_TC(xb)
-    y -= 1.2*cm
+    y -= 1.0*cm
     c.setFont("Helvetica-Bold", 12)
-    c.drawString(1.5*cm, y, f"Resultado principal → WAT ≈ {T_wat:.2f} °C")
+    c.setFillColorRGB(0.06, 0.46, 0.43)
+    c.drawString(margin_x, y, f"Resultado principal → WAT ≈ {T_wat:.2f} °C")
+    c.setFillColorRGB(0,0,0)
 
-    # Inserta figura
-    y_fig = y - 0.5*cm
+    # Figura
+    y -= 0.5*cm
     try:
         img = ImageReader(io.BytesIO(fig_png_bytes))
-        # escala para que entre en A4 con márgenes
-        fig_w = W - 3*cm
+        fig_w = W - 2*margin_x
         fig_h = fig_w * 0.62
-        c.drawImage(img, x=1.5*cm, y=y_fig - fig_h, width=fig_w, height=fig_h, mask='auto')
-        y = y_fig - fig_h - 0.8*cm
+        # si no entra, ajusta
+        if y - fig_h < margin_y:
+            fig_h = y - margin_y
+            fig_w = fig_h / 0.62
+        c.drawImage(img, x=margin_x, y=y - fig_h, width=fig_w, height=fig_h, mask='auto')
+        y = y - fig_h - 0.8*cm
     except Exception:
         y -= 0.5*cm
 
-    # Página 2: explicación pedagógica
+    # ===== Página 2: explicación =====
     c.showPage()
 
     margin = 2.0*cm
@@ -312,10 +328,9 @@ def export_pedagogical_pdf(df, fit, fig_png_bytes, meta, custom_logo_bytes=None)
     def write_paragraph(text, leading=14, font="Helvetica", size=11):
         nonlocal y
         c.setFont(font, size)
-        width = W - 2*margin
-        # envoltura manual simple
+        width_chars = 95  # envoltura simple
         import textwrap
-        for line in textwrap.wrap(text, width=95):
+        for line in textwrap.wrap(text, width=width_chars):
             c.drawString(margin, y, line)
             y -= leading
 
@@ -325,7 +340,7 @@ def export_pedagogical_pdf(df, fit, fig_png_bytes, meta, custom_logo_bytes=None)
     y -= 18
     c.setFillColorRGB(0,0,0)
 
-    x, ylog = prepare_xy(df)
+    x_arr, ylog = prepare_xy(df)
     k = fit["k_opt"]
     m1, b1 = fit["coefs1"]
     m2, b2 = fit["coefs2"]
@@ -408,12 +423,9 @@ st.sidebar.caption("Asignatura electiva · UTN – FRN")
 def header():
     col_logo, col_title = st.columns([1, 5], vertical_alignment="center")
     with col_logo:
-        # permitir subir logo alternativo
-        upl = st.file_uploader("Logo (logoutn.png)", type=["png"], key="logo_up", label_visibility="collapsed")
-        if upl is not None:
-            st.session_state.logo_bytes = upl.getvalue()
+        # MOSTRAR SIEMPRE EL LOGO DEL REPO (logoutn.png) SI EXISTE
         if st.session_state.logo_bytes:
-            st.image(st.session_state.logo_bytes, use_column_width=True)
+            st.image(st.session_state.logo_bytes, use_container_width=True)
     with col_title:
         st.markdown(
             f"""
@@ -513,7 +525,6 @@ elif page == "Ajuste WAT":
                 fig = make_figure(df, fit)
                 st.pyplot(fig, use_container_width=True)
 
-                # guardar figuras
                 fig_png = fig_to_png_bytes(fig)
                 fig_pdf = fig_to_pdf_bytes(fig)
                 st.session_state.fig_png = fig_png
@@ -567,7 +578,7 @@ m2 = {m2:.5f}, b2 = {b2:.5f}
                     st.download_button(
                         "⬇️ Descargar Reporte PDF",
                         data=pdf_bytes,
-                        file_name="Reporte_WAT_pedagogico.pdf",
+                        file_name="Reporte_WAT_pedagógico.pdf",
                         mime="application/pdf"
                     )
 
@@ -610,7 +621,7 @@ elif page == "Acerca de":
     header()
     st.markdown(
         """
-        **Versión:** 1.0  
+        **Versión:** 1.1  
         **Función:** Detección de WAT y creación de reportes.  
         **Créditos:** Cátedra Flujos Multifásicos – UTN FRN.  
         **Licencia:** Uso académico.
