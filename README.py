@@ -7,11 +7,10 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-# --- Corrección: fijar backend y evitar instalación en caliente ---
+# --- Backend Matplotlib para servidores/Streamlit ---
 import matplotlib
-matplotlib.use("Agg")  # backend headless para servidores/Streamlit
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-# -----------------------------------------------------------------
 
 import streamlit as st
 from reportlab.lib.pagesizes import A4
@@ -33,7 +32,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Paleta sencilla
+# Paleta
 PRIMARY = "#0F766E"   # teal-700
 ACCENT  = "#0891B2"   # cyan-600
 MUTED   = "#475569"   # slate-600
@@ -49,7 +48,7 @@ def read_csv_no_header(file) -> pd.DataFrame:
     df = pd.read_csv(file, header=None)
     df = df.rename(columns={0: "T_C", 1: "mu_Pa_s"})
     df = df.replace([np.inf, -np.inf], np.nan).dropna()
-    df = df[(df["mu_Pa_s"] > 0)]
+    df = df[df["mu_Pa_s"] > 0]
     df = df.sort_values("T_C").reset_index(drop=True)
     return df
 
@@ -59,55 +58,78 @@ def clean_manual_df(df: pd.DataFrame) -> pd.DataFrame:
     df["T_C"] = pd.to_numeric(df["T_C"], errors="coerce")
     df["mu_Pa_s"] = pd.to_numeric(df["mu_Pa_s"], errors="coerce")
     df = df.replace([np.inf, -np.inf], np.nan).dropna()
-    df = df[(df["mu_Pa_s"] > 0)]
+    df = df[df["mu_Pa_s"] > 0]
     df = df.sort_values("T_C").reset_index(drop=True)
     return df
 
-def segmented_two_lines(x, y, min_pts=3):
+def segmented_two_lines(x, y, min_pts=3, n_grid=600):
     """
-    Búsqueda de quiebre (índice k) que minimiza SSE global de dos regresiones lineales.
-    x: 1/T [K^-1], y: log10(mu)
-    Retorna dict con: k_opt, coefs1, coefs2, sse_min, x_break, y_break.
+    Estima quiebre continuo τ con CONTINUIDAD (modelo 'hinge'):
+      y = β0 + β1*(x-τ)_- + β2*(x-τ)_+
+    Busca τ por malla fina y resuelve OLS (cerrado) para cada τ.
+    Devuelve: k_opt (índice cercano a τ), coefs1, coefs2, sse_min, x_break=τ, y_break.
     """
+    x = np.asarray(x); y = np.asarray(y)
     n = len(x)
     if n < 2*min_pts:
         return None
 
-    best = {
-        "k_opt": None,
-        "coefs1": None,
-        "coefs2": None,
-        "sse_min": np.inf,
-        "x_break": None,
-        "y_break": None
+    # Ordenar por x (1/T)
+    idx = np.argsort(x)
+    xs, ys = x[idx], y[idx]
+
+    # Rango de τ dejando min_pts a cada lado
+    lo = xs[min_pts-1]
+    hi = xs[-min_pts]
+
+    # Si el rango es degenerado, abortar
+    if not np.isfinite(lo) or not np.isfinite(hi) or lo >= hi:
+        return None
+
+    taus = np.linspace(lo, hi, n_grid)
+
+    best_sse = np.inf
+    best = None
+
+    for tau in taus:
+        xm = xs - tau
+        X = np.column_stack([
+            np.ones_like(xm),
+            np.minimum(xm, 0.0),  # (x-τ)_-
+            np.maximum(xm, 0.0)   # (x-τ)_+
+        ])
+        beta, *_ = np.linalg.lstsq(X, ys, rcond=None)
+        yhat = X @ beta
+        sse = np.sum((ys - yhat)**2)
+        if sse < best_sse:
+            best_sse = sse
+            best = (tau, beta)
+
+    tau, beta = best
+    b0, b1, b2 = beta
+
+    # Pendientes izquierda/derecha (en y vs x)
+    m_left  = b1
+    m_right = b2
+    # Interceptos equivalentes por tramo (y = m*x + b)
+    b_left  = b0 - b1*tau
+    b_right = b0 - b2*tau
+
+    # y en el quiebre (continua)
+    y_break = b0
+
+    # índice más cercano a τ (informativo, en base al ordenado)
+    k_closest = int(np.argmin(np.abs(xs - tau)))
+    k_opt = idx[k_closest]
+
+    return {
+        "k_opt": int(k_opt),
+        "coefs1": (float(m_left),  float(b_left)),
+        "coefs2": (float(m_right), float(b_right)),
+        "sse_min": float(best_sse),
+        "x_break": float(tau),
+        "y_break": float(y_break)
     }
-
-    for k in range(min_pts-1, n - min_pts):
-        x1, y1 = x[:k+1], y[:k+1]
-        x2, y2 = x[k+1:], y[k+1:]
-        m1, b1 = np.polyfit(x1, y1, 1)
-        m2, b2 = np.polyfit(x2, y2, 1)
-        sse1 = np.sum((y1 - (m1*x1 + b1))**2)
-        sse2 = np.sum((y2 - (m2*x2 + b2))**2)
-        sse = sse1 + sse2
-        if sse < best["sse_min"]:
-            if abs(m1 - m2) > 1e-12:
-                x_int = (b2 - b1) / (m1 - m2)
-                y_int = m1*x_int + b1
-            else:
-                x_int = (x[k] + x[k+1]) / 2.0
-                y_int = (y[k] + y[k+1]) / 2.0
-
-            best = {
-                "k_opt": k,
-                "coefs1": (m1, b1),
-                "coefs2": (m2, b2),
-                "sse_min": sse,
-                "x_break": x_int,
-                "y_break": y_int
-            }
-
-    return best
 
 def x_to_TC(x_invK):
     """1/T[K] -> T[°C]"""
@@ -130,20 +152,15 @@ def make_figure(df: pd.DataFrame, fit, estilo="apunte"):
       - x: T [°C]
     El ajuste se hace en (log10 μ) vs (1/T) y se transforma a μ vs T para visualizar.
     """
-    # Datos
     T_C = df["T_C"].values
-    mu   = df["mu_Pa_s"].values
+    mu  = df["mu_Pa_s"].values
 
-    # Coeficientes del ajuste en espacio (x=1/T[K], y=log10(mu))
     m1, b1 = fit["coefs1"]
     m2, b2 = fit["coefs2"]
     k      = fit["k_opt"]
     xb, yb = fit["x_break"], fit["y_break"]   # xb = (1/T[K])*, yb = log10(mu)*
 
-    # Ejes: T [°C] como x principal
     fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
-
-    # Dispersión de datos en μ vs T
     ax.scatter(T_C, mu, color=PRIMARY, label="Datos", zorder=3)
 
     # Construir curvas de ajuste EN μ vs T:
@@ -156,7 +173,6 @@ def make_figure(df: pd.DataFrame, fit, estilo="apunte"):
         y_log10 = m * x_invK + b
         return np.power(10.0, y_log10)
 
-    # Curvas suaves por tramo
     T1_line = np.linspace(T1.min(), T1.max(), 80) if len(T1) >= 2 else T1
     T2_line = np.linspace(T2.min(), T2.max(), 80) if len(T2) >= 2 else T2
 
@@ -166,15 +182,13 @@ def make_figure(df: pd.DataFrame, fit, estilo="apunte"):
     ax.plot(T1_line, mu1_line, color=ACCENT, lw=2, label="Ajuste tramo 1")
     ax.plot(T2_line, mu2_line, color=MUTED,  lw=2, label="Ajuste tramo 2")
 
-    # Punto crítico (WAT) en coordenadas T[°C]–μ
+    # Punto crítico (WAT)
     T_wat = x_to_TC(xb)
     mu_wat = np.power(10.0, yb)
     ax.scatter([T_wat], [mu_wat], color="red", s=70, zorder=4, label="Punto crítico (WAT)")
 
-    # Estilo de ejes (log en Y)
     from matplotlib.ticker import LogLocator, LogFormatterMathtext, NullFormatter
     ax.set_yscale("log", base=10)
-    # rango sugerido; podés comentar si querés autoscale
     ymin = min(1e-3, np.nanmin(mu)*0.8) if np.all(np.isfinite(mu)) else 1e-3
     ymax = max(1e2,  np.nanmax(mu)*1.2) if np.all(np.isfinite(mu)) else 1e2
     ax.set_ylim(ymin, ymax)
@@ -189,7 +203,7 @@ def make_figure(df: pd.DataFrame, fit, estilo="apunte"):
     ax.legend(frameon=False, loc="best")
     ax.set_title(f"Determinación de WAT   {T_wat:.1f} °C")
 
-    # Eje superior opcional con 1/T [K^-1]
+    # Eje superior: 1/T [K^-1]
     ax_top = ax.secondary_xaxis(
         'top',
         functions=(lambda Tc: 1.0/(Tc+273.15), lambda invT: (1.0/invT)-273.15)
@@ -199,7 +213,6 @@ def make_figure(df: pd.DataFrame, fit, estilo="apunte"):
     ax_top.set_xticks(xticks)
     ax_top.set_xlabel(r"$1/T$  [K$^{-1}$]")
 
-    # Anotación WAT
     ax.annotate(f"WAT ≈ {T_wat:.2f} °C",
                 xy=(T_wat, mu_wat),
                 xytext=(T_wat + 0.03*(T_C.max()-T_C.min()), mu_wat*1.3),
@@ -208,7 +221,6 @@ def make_figure(df: pd.DataFrame, fit, estilo="apunte"):
 
     plt.tight_layout()
     return fig
-
 
 def fig_to_png_bytes(fig):
     buf = io.BytesIO()
@@ -223,9 +235,7 @@ def fig_to_pdf_bytes(fig):
     return buf.getvalue()
 
 def maybe_load_logo():
-    """
-    Carga logoutn.png desde el directorio del app (repo local). Si no existe, devuelve None.
-    """
+    """Carga logoutn.png si existe en el directorio."""
     path = "logoutn.png"
     if os.path.exists(path):
         try:
@@ -238,7 +248,6 @@ def maybe_load_logo():
 def export_pedagogical_pdf(df, fit, fig_png_bytes, meta, custom_logo_bytes=None):
     """
     PDF pedagógico (A4) con portada, datos, figura y explicación.
-    Maquetación corregida para evitar superposición de logo y títulos.
     """
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -247,13 +256,11 @@ def export_pedagogical_pdf(df, fit, fig_png_bytes, meta, custom_logo_bytes=None)
     # ===== Portada / Encabezado =====
     margin_x = 1.5*cm
     margin_y = 1.5*cm
-    header_height = 3.0*cm  # banda de encabezado
+    header_height = 3.0*cm
 
-    # Banda superior
-    c.setFillColorRGB(0.93, 0.99, 1.00)  # celeste muy claro
+    c.setFillColorRGB(0.93, 0.99, 1.00)
     c.rect(0, H - header_height, W, header_height, stroke=0, fill=1)
 
-    # Logo a la derecha
     if custom_logo_bytes:
         try:
             logo = ImageReader(io.BytesIO(custom_logo_bytes))
@@ -272,20 +279,17 @@ def export_pedagogical_pdf(df, fit, fig_png_bytes, meta, custom_logo_bytes=None)
         except Exception:
             pass
 
-    # Título a la izquierda
-    c.setFillColorRGB(0.06, 0.46, 0.43)  # PRIMARY
+    c.setFillColorRGB(0.06, 0.46, 0.43)
     c.setFont("Helvetica-Bold", 16)
     c.drawString(margin_x, H - margin_y - 0.8*cm, meta["page_title"])
-    c.setFillColorRGB(0.03, 0.57, 0.70)  # ACCENT
+    c.setFillColorRGB(0.03, 0.57, 0.70)
     c.setFont("Helvetica-Bold", 13)
     c.drawString(margin_x, H - margin_y - 1.5*cm, meta["page_subtitle"])
 
-    # Línea divisoria
     c.setStrokeColorRGB(0.75, 0.90, 0.95)
     c.setLineWidth(1.2)
     c.line(margin_x, H - header_height - 0.2*cm, W - margin_x, H - header_height - 0.2*cm)
 
-    # Metadatos (debajo del encabezado)
     y = H - header_height - 0.8*cm
     c.setFillColorRGB(0, 0, 0)
     c.setFont("Helvetica", 11)
@@ -295,7 +299,6 @@ def export_pedagogical_pdf(df, fit, fig_png_bytes, meta, custom_logo_bytes=None)
     y -= 0.6*cm
     c.drawString(margin_x, y, f"Fecha de generación: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
-    # Resultado WAT
     xb = fit["x_break"]
     T_wat = x_to_TC(xb)
     y -= 1.0*cm
@@ -304,13 +307,11 @@ def export_pedagogical_pdf(df, fit, fig_png_bytes, meta, custom_logo_bytes=None)
     c.drawString(margin_x, y, f"Resultado principal → WAT ≈ {T_wat:.2f} °C")
     c.setFillColorRGB(0,0,0)
 
-    # Figura
     y -= 0.5*cm
     try:
         img = ImageReader(io.BytesIO(fig_png_bytes))
         fig_w = W - 2*margin_x
         fig_h = fig_w * 0.62
-        # si no entra, ajusta
         if y - fig_h < margin_y:
             fig_h = y - margin_y
             fig_w = fig_h / 0.62
@@ -321,14 +322,13 @@ def export_pedagogical_pdf(df, fit, fig_png_bytes, meta, custom_logo_bytes=None)
 
     # ===== Página 2: explicación =====
     c.showPage()
-
     margin = 2.0*cm
     y = H - margin
 
     def write_paragraph(text, leading=14, font="Helvetica", size=11):
         nonlocal y
         c.setFont(font, size)
-        width_chars = 95  # envoltura simple
+        width_chars = 95
         import textwrap
         for line in textwrap.wrap(text, width=width_chars):
             c.drawString(margin, y, line)
@@ -352,13 +352,13 @@ def export_pedagogical_pdf(df, fit, fig_png_bytes, meta, custom_logo_bytes=None)
         "WAT se intensifican los efectos de cristalización y la pendiente efectiva cambia."
     )
     write_paragraph(
-        f"En el conjunto de datos analizado (N={len(df)}), la partición óptima se halló en k={k}, "
-        "minimizando el error cuadrático total de dos regresiones lineales. La intersección de "
-        "las rectas define el punto crítico desde el cual se informa WAT."
+        f"En el conjunto de datos analizado (N={len(df)}), la búsqueda de un quiebre continuo "
+        f"τ∈[{x_arr[min( len(x_arr)-1, 2 )]:.5f}, {x_arr[max(0, len(x_arr)-3)]:.5f}] con continuidad "
+        "minimizó el error cuadrático total. La intersección define el punto crítico y se informa WAT."
     )
     write_paragraph(
-        f"Resultado: WAT ≈ {T_wat:.2f} °C. Sugerencia operativa (regla simple): mantener "
-        "T_pared > WAT + 3 °C para reducir fuertemente la tasa de depósito."
+        f"Resultado: WAT ≈ {T_wat:.2f} °C. Regla operativa: mantener T_pared > WAT + 3 °C para "
+        "reducir la tasa de depósito."
     )
 
     y -= 10
@@ -413,7 +413,6 @@ if "logo_bytes" not in st.session_state:
 # ==============================
 st.sidebar.title("Navegación")
 page = st.sidebar.radio("Ir a:", ["Principal", "Cargar datos", "Ajuste WAT", "Teoría", "Acerca de"])
-
 st.sidebar.markdown("---")
 st.sidebar.caption("Asignatura electiva · UTN – FRN")
 
@@ -423,7 +422,6 @@ st.sidebar.caption("Asignatura electiva · UTN – FRN")
 def header():
     col_logo, col_title = st.columns([1, 5], vertical_alignment="center")
     with col_logo:
-        # MOSTRAR SIEMPRE EL LOGO DEL REPO (logoutn.png) SI EXISTE
         if st.session_state.logo_bytes:
             st.image(st.session_state.logo_bytes, use_container_width=True)
     with col_title:
@@ -449,10 +447,11 @@ if page == "Principal":
         """
         ### Objetivo de la app
         Estimar la **Temperatura de Aparición de Cera (WAT)** a partir de datos de **Temperatura [°C]** y 
-        **Viscosidad [Pa·s]** mediante ajuste por **pendiente quebrada** en la curva **log10(μ) vs 1/T[K]**.  
+        **Viscosidad [Pa·s]** mediante ajuste por **quiebre continuo con continuidad** en la curva 
+        **log10(μ) vs 1/T[K]** (modelo tipo *hinge*).  
         La app:
         - Limpia y valida datos,  
-        - Busca el **punto de quiebre** que minimiza el error global de dos rectas,  
+        - Busca el **quiebre continuo** que minimiza el error global,  
         - Calcula y reporta **WAT**,  
         - Genera una **figura** con los ajustes y el punto crítico,  
         - Exporta imagen **PNG/PDF** y un **PDF pedagógico** con explicación técnica.
@@ -500,7 +499,7 @@ elif page == "Cargar datos":
 
 elif page == "Ajuste WAT":
     header()
-    st.subheader("2) Ajuste por pendiente quebrada y exportación")
+    st.subheader("2) Ajuste por quiebre continuo y exportación")
 
     df = st.session_state.data
     if df.empty or len(df) < 6:
@@ -509,10 +508,22 @@ elif page == "Ajuste WAT":
         st.write("**Datos vigentes:**")
         st.dataframe(df, use_container_width=True, height=240)
 
-        min_pts = st.slider("Mínimo de puntos por tramo", min_value=3, max_value=10, value=3, step=1,
-                            help="A mayor mínimo, más robusto el ajuste por tramo.")
+        col_opts = st.columns(2)
+        with col_opts[0]:
+            min_pts = st.slider(
+                "Mínimo de puntos por lado del quiebre",
+                min_value=3, max_value=10, value=4, step=1,
+                help="A mayor mínimo, más robusto el ajuste por tramo."
+            )
+        with col_opts[1]:
+            n_grid = st.slider(
+                "Resolución de búsqueda de τ (quiebre)",
+                min_value=200, max_value=2000, value=800, step=100,
+                help="Valor alto = búsqueda más fina (más costo computacional)."
+            )
+
         x, y = prepare_xy(df)
-        fit = segmented_two_lines(x, y, min_pts=min_pts)
+        fit = segmented_two_lines(x, y, min_pts=min_pts, n_grid=n_grid)
 
         if not fit:
             st.error("No se pudo realizar el ajuste. Verificá la cantidad/calidad de datos.")
@@ -535,9 +546,9 @@ elif page == "Ajuste WAT":
                 m1, b1 = fit["coefs1"]
                 m2, b2 = fit["coefs2"]
                 st.metric("WAT estimada [°C]", f"{T_wat:.2f}")
-                st.caption(f"Índice de quiebre k={k} (partición de datos).")
+                st.caption(f"Índice cercano al quiebre (k≈) = {k} (solo informativo).")
 
-                st.markdown("**Parámetros de ajuste**")
+                st.markdown("**Parámetros de ajuste (y = m·x + b en log10 μ vs 1/T)**")
                 st.code(
 f"""Tramo 1: y = m1*x + b1
 m1 = {m1:.5f}, b1 = {b1:.5f}
@@ -560,7 +571,6 @@ m2 = {m2:.5f}, b2 = {b2:.5f}
                         mime="application/pdf"
                     )
 
-                # Reporte pedagógico
                 if st.button("📄 Generar Reporte Pedagógico (PDF)", type="primary"):
                     meta = {
                         "page_title": PAGE_TITLE,
@@ -583,8 +593,8 @@ m2 = {m2:.5f}, b2 = {b2:.5f}
                     )
 
             st.info(
-                "Tip: verificá la sensibilidad de la WAT removiendo outliers, cambiando el mínimo de puntos "
-                "por tramo o comparando con otro dataset."
+                "Tip: verificá la sensibilidad de la WAT cambiando min_pts y n_grid, "
+                "y testeando la remoción de outliers fríos/calientes."
             )
 
 elif page == "Teoría":
@@ -596,11 +606,11 @@ elif page == "Teoría":
             "fase sólida de parafinas en equilibrio. Operar por debajo del WAT incrementa la viscosidad "
             "y favorece la formación de depósitos en pared."
         )
-    with st.expander("📉 Método de pendiente quebrada"):
+    with st.expander("📉 Método de quiebre continuo con continuidad"):
         st.write(
-            "Si graficamos **log10(μ)** contra **1/T[K]**, muchos crudos muestran un tramo casi lineal a "
-            "altas temperaturas (comportamiento Arrhenius). Al enfriar, la pendiente efectiva cambia por "
-            "cristalización. El **punto de quiebre** entre dos rectas ajustadas aproxima el WAT."
+            "Se modela **log10(μ)** contra **1/T[K]** con un término tipo *bisagra* (hinge): "
+            "y = β0 + β1(x-τ)_- + β2(x-τ)_+. La búsqueda de τ que minimiza el error global y fuerza continuidad "
+            "evita sesgos por discretización y mejora la localización del quiebre."
         )
     with st.expander("🧪 Buenas prácticas de laboratorio/datos"):
         st.markdown(
@@ -611,9 +621,9 @@ elif page == "Teoría":
         )
     with st.expander("⚙️ Ingeniería y operación"):
         st.markdown(
-            "- Regla práctica: mantener **T_pared > WAT + 3 °C** para atenuar depósitos.\n"
-            "- Complementar con **inhibidores**, **aislamiento térmico** y **pigging**.\n"
-            "- Estimar la **VMT** (Velocidad Mínima de Transporte) al diseñar/operar ductos."
+            "- Regla práctica: mantener **T_pared > WAT + 3 °C**.\n"
+            "- Complementar con **inhibidores**, **aislamiento** y **pigging**.\n"
+            "- Evaluar **VMT** (Velocidad Mínima de Transporte)."
         )
     st.success("RA1–CE1 → entendimiento fenomenológico y lectura crítica de curvas μ–T.")
 
@@ -621,19 +631,19 @@ elif page == "Acerca de":
     header()
     st.markdown(
         """
-        **Versión:** 1.1  
+        **Versión:** 1.2 (quiebre continuo con continuidad)  
         **Función:** Detección de WAT y creación de reportes.  
         **Créditos:** Cátedra Flujos Multifásicos – UTN FRN.  
         **Licencia:** Uso académico.
         """
     )
 
-# Footer sutil
+# Footer
 st.markdown(
     f"""
     <hr style="opacity:.15"/>
     <div style="color:#64748b;font-size:12px">
-    © {datetime.now().year} · UTN – FR Neuquén · App educativa para estimación de WAT por pendiente quebrada.
+    © {datetime.now().year} · UTN – FR Neuquén · App educativa para estimación de WAT por quiebre continuo.
     </div>
     """,
     unsafe_allow_html=True
